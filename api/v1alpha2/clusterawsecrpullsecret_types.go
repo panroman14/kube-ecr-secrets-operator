@@ -17,21 +17,29 @@ limitations under the License.
 package v1alpha2
 
 import (
-	"github.com/zak905/kube-ecr-secrets-operator/common"
+	"github.com/panroman14/kube-ecr-secrets-operator/common"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// ClusterAWSECRImagePullSecretSpec defines the desired state of ClusterAWSECRCredentials
+// ClusterAWSECRImagePullSecretSpec defines the desired state of ClusterAWSECRImagePullSecret.
+// The same pull secret is created in every namespace listed in namespaces.
+// +kubebuilder:validation:XValidation:rule="has(self.awsAccess.secretNamespace) && size(self.awsAccess.secretNamespace) > 0",message="awsAccess.secretNamespace is required: the namespace of the AWS credentials Secret"
 type ClusterAWSECRImagePullSecretSpec struct {
-	//the name of the secret holding the AWS credentials that will be used to talk to AWS to get ECR credentials
-	AWSAccess common.AWSAccess `json:"awsAccess,omitempty"`
+	// Where the AWS credentials are.
+	AWSAccess common.AWSAccess `json:"awsAccess"`
+
+	// Name of the kubernetes.io/dockerconfigjson Secret the operator creates and keeps
+	// refreshed in each namespace. Reference it in imagePullSecrets. The operator never
+	// takes over an existing Secret it did not create.
 	//+kubebuilder:validation:MaxLength=253
 	//+kubebuilder:validation:MinLength=1
-	//the name of the docker secret that will be created and updated by the operator in each of the specified namespaces
-	SecretName string `json:"secretName,omitempty"`
+	//+kubebuilder:validation:XValidation:rule="self == oldSelf",message="secretName is immutable"
+	SecretName string `json:"secretName"`
+
+	// Namespaces to create the pull secret in.
 	//+kubebuilder:validation:MinItems=1
-	//the namespaces in which the operator will create and and manage ECR registry docker secrets
-	Namespaces []string `json:"namespaces,omitempty"`
+	//+listType=set
+	Namespaces []string `json:"namespaces"`
 }
 
 // ClusterAWSECRImagePullSecretStatus defines the observed state of ClusterAWSECRCredentials.
@@ -43,6 +51,12 @@ type ClusterAWSECRImagePullSecretStatus struct {
 	//+patchMergeKey=type
 	//+optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Namespaces that hold this object's pull secret. Used to delete the pull secret from
+	// namespaces that were removed from spec.namespaces.
+	//+listType=set
+	//+optional
+	Namespaces []string `json:"namespaces,omitempty"`
 }
 
 //+kubebuilder:object:root=true

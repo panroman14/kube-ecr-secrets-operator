@@ -1,0 +1,7 @@
+{{ include "epso.name" . }} is installed.
+
+Check a pull secret object:
+  kubectl get clusterawsecrimagepullsecrets
+  kubectl describe clusterawsecrimagepullsecret <name>
+
+Ready=True means the pull secret exists and is refreshed 2h before the token expires.

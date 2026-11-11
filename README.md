@@ -1,139 +1,191 @@
-[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/kube-ecr-secrets-operator)](https://artifacthub.io/packages/search?repo=kube-ecr-secrets-operator)
+# kube-ecr-secrets-operator
 
-## kube-ecr-secrets-operator:
+Keeps AWS ECR image pull secrets fresh in Kubernetes. ECR tokens expire after 12 hours, so a
+static `imagePullSecret` breaks the next time a pod is rescheduled. This operator requests a
+token with an IAM user's keys, writes a `kubernetes.io/dockerconfigjson` Secret into the
+namespaces you list, and rewrites it every hour (the token lives 12h).
 
-Kubernetes operator that helps dealing with `ImagePullBackOff` errors that may arise if a pod is rescheduled or re-started. A pod can be rescheduled or re-started any time of the day, under specific conditions (eviction, application crash,..etc). Because [AWS ECR](https://aws.amazon.com/ecr/) credentials expire every 12 hours, this may lead to disruptions due to the inability to pull the pod image, especially if the image pull policy is set to `Always`. 
+Hardened fork of [zak905/kube-ecr-secrets-operator](https://github.com/zak905/kube-ecr-secrets-operator) 0.2.13.
+The API group and the `v1alpha2` kinds are unchanged.
 
+## Supported Kubernetes versions
 
-```mermaid
-flowchart TB
-    subgraph ns1 ["<br><br><br>
-    namespace 1"]
-    a1("fa:fa-key ECR secret
-     kubernetes.io/dockerconfigjson
-    ")
-    end
-    subgraph ns2 ["<br><br><br>
-    namespace 2"]
-    b1("fa:fa-key ECR secret
-     kubernetes.io/dockerconfigjson
-    ")
-    end
-    subgraph ns3 ["<br><br><br>
-namespace 3"]
-    c1("fa:fa-key ECR secret 
-     kubernetes.io/dockerconfigjson
-    ")
-    end
-    operator("fa:fa-wrench kube-ecr-secrets-operator")
-    operator --> |"fa:fa-rotate-right rotate every 12h"|a1
-    operator --> |"fa:fa-rotate-right rotate every 12h"|b1
-    operator --> |"fa:fa-rotate-right rotate every 12h"|c1
+Requires **1.25+** (CRD validation rules, CEL). Tested end to end (real ECR pull) on k3s:
+
+| Kubernetes | Result |
+|---|---|
+| 1.25.16 | ok |
+| 1.27.16 | ok |
+| 1.34.4  | ok |
+
+## How it works
+
+1. You create a Secret with the IAM user's `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`.
+2. You create a `ClusterAWSECRImagePullSecret` (or a namespaced `AWSECRImagePullSecret`) that points to it.
+3. The operator calls `ecr:GetAuthorizationToken` and creates the pull secret in each target namespace.
+4. It rewrites the pull secrets every hour. A deleted pull secret, a recreated namespace or rotated AWS keys are picked up within an hour (or right away, see [Status](#status-and-troubleshooting)).
+5. Deleting the object deletes its pull secrets (owner references). Removing a namespace from `namespaces` deletes the pull secret there.
+
+The token covers the ECR registry of the IAM user's own AWS account, in the given region.
+
+The keys never appear in the custom object, only in a Secret.
+
+## Install
+
+```bash
+helm install kube-ecr-secrets-operator ./charts/kube-ecr-secrets-operator \
+  --kube-context your-context -n kube-ecr-secrets-operator --create-namespace \
+  --set secretNamespaces='{default}'
 ```
 
-kube-ecr-secrets-operator manages AWS ECR (Elastic Container Registry) secrets cluster wide. ECR docker credentials expire every 12 hours, and need to be refreshed periodically to avoid any workload disruption that may arise from a direct human action like a deploy or Kubernetes initiated action like a pod reschedule. It introduces the `ClusterAWSECRImagePullSecret` (cluster scoped) and the `AWSECRImagePullSecret` (namespaced) CRDs that:
+The chart ships the CRDs in `crds/`. Helm installs them but **does not upgrade** them, so after
+a chart upgrade run:
 
-1. creates a docker credential kubernetes secret
-2. Once the secrets are created, the controller takes care of refreshing them periodically (every 12h)
-
-## Examples:
-
-```
-apiVersion: aws.zakariaamine.com/v1alpha2
-kind: AWSECRImagePullSecret
-metadata:
-  name: my-ecr-credentials
-spec:
-  awsAccess:
-    accessKeyId: YOUR_ACCESS_KEY_ID
-    secretAccessKey: YOUR_SECRET_ACCESS_KEY
-    region: THE_ECR_REGION
-  secretName: ecr-login
+```bash
+kubectl --context your-context apply --server-side --force-conflicts -f charts/kube-ecr-secrets-operator/crds/
 ```
 
-If the secret needs to be managed in several namespaces, the `ClusterAWSECRImagePullSecret` cluster scoped CRD can be used. It has an additional `namespaces` field under `spec` that allows specifying the namespaces.
+## Configuration
 
+### IAM user
+
+Minimum policy (one repository; widen `Resource` as needed):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Effect": "Allow", "Action": "ecr:GetAuthorizationToken", "Resource": "*" },
+    { "Effect": "Allow",
+      "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"],
+      "Resource": "arn:aws:ecr:eu-west-1:123456789012:repository/your-repository" }
+  ]
+}
 ```
+
+### Credentials Secret
+
+```bash
+kubectl --context your-context -n default create secret generic aws-ecr-credentials --from-env-file=aws.env
+```
+
+`aws.env` contains the two lines `AWS_ACCESS_KEY_ID=...` and `AWS_SECRET_ACCESS_KEY=...`.
+
+### ClusterAWSECRImagePullSecret (several namespaces)
+
+```yaml
 apiVersion: aws.zakariaamine.com/v1alpha2
 kind: ClusterAWSECRImagePullSecret
 metadata:
-  name: test-ecr-credentials
+  name: ecr
 spec:
   awsAccess:
-    accessKeyId: YOUR_ACCESS_KEY_ID
-    secretAccessKey: YOUR_SECRET_ACCESS_KEY
-    region: THE_ECR_REGION
-  secretName: ecr-login
-  namespaces:
-    - ns1
-    - ns2
-    - ns3
+    secretName: aws-ecr-credentials   # Secret with the keys
+    secretNamespace: default          # required here
+    region: eu-west-1
+  secretName: ecr-pull                # pull secret created in every namespace below
+  namespaces: [default, app]
 ```
 
-## Installation and Usage:
+### AWSECRImagePullSecret (own namespace)
 
-The operator can be installed using helm:
-
-```
-helm repo add zakariaamine https://zak905.github.io/kube-ecr-secrets-operator/repo-helm
-
-helm repo update 
-
-helm install --create-namespace kube-ecr-secrets-operator zakariaamine/kube-ecr-secrets-operator -n kube-ecr-secrets-operator-system
-
-```
-
-Once the chart is installed, `AWSECRImagePullSecret` and `ClusterAWSECRImagePullSecret` objects can be created.
-
-For the admission webhooks server TLS, the chart uses a Kubernetes Job that generates a long lived self-signed certificate using openssl and stores it in a Secret. The Job makes use of the helm `post-install` and `post-upgrade` hooks. 
-
-It is, of course, highly recommended to limit the permissions of the IAM user to ECR only. Needless to say, the usage of the root AWS user credentials is highly discouraged.
-
-## CRDs:
-
-The CRDs definitions are part of the helm chart. A known shortcoming of using helm to install CRDs is the inability to update the CRDs (if there is a change) on subsequent chart upgrades. To overcome the shortcoming, one of the following solutions can help:
-* The chart can be uninstalled and installed when there is a new release with a CRD change.
-* The CRDs can be installed using `kubectl` as a first step:
-  
-``` 
-kubectl apply -f https://raw.githubusercontent.com/zak905/kube-ecr-secrets-operator/refs/heads/master/chart/crds/aws.zakariaamine.com_awsecrcredentials.yaml
-kubectl apply -f https://raw.githubusercontent.com/zak905/kube-ecr-secrets-operator/refs/heads/master/chart/crds/aws.zakariaamine.com_awsecrimagepullsecrets.yaml
-kubectl apply -f https://raw.githubusercontent.com/zak905/kube-ecr-secrets-operator/refs/heads/master/chart/crds/aws.zakariaamine.com_clusterawsecrimagepullsecrets.yaml
+```yaml
+apiVersion: aws.zakariaamine.com/v1alpha2
+kind: AWSECRImagePullSecret
+metadata:
+  name: ecr
+  namespace: app
+spec:
+  awsAccess:
+    secretName: aws-ecr-credentials   # must be in the same namespace
+    region: eu-west-1
+  secretName: ecr-pull
 ```
 
-and then the chart can be installed with the `--skip-crds` flag.
+Then use `imagePullSecrets: [{name: ecr-pull}]` in pods. More files are in [examples/](examples/).
 
-## Monitoring and Troubleshooting:
+The API server enforces these rules with CEL:
+- `secretName` cannot be changed after creation. Delete and recreate the object instead.
+- A cluster object must set `awsAccess.secretNamespace`. A namespaced object must not set it.
 
-The CRs status stanza reports the current state of the CR objects. In case an unexpected behavior is observed, the first step for troubleshooting is to inspect the `status`: `kubectl get awsecrimagepullsecret the-name-of-the-object`. For example:
+### Objects from Helm values
 
+Instead of writing objects by hand, the chart can create `ClusterAWSECRImagePullSecret` objects:
+
+```yaml
+secretNamespaces: [default]     # credentials namespace + every target namespace
+pullSecrets:
+  - name: ecr
+    region: eu-west-1
+    credentialsSecret: aws-ecr-credentials
+    credentialsNamespace: default
+    secretName: ecr-pull
+    namespaces: [default]
 ```
-  status:
-    conditions:
-    - lastTransitionTime: "2023-10-04T20:45:52Z"
-      message: 'AWS ECR secret with type kubernetes.io/dockerconfigjson have been
-        created/updated successfully in namespaces: [ns1] next update at: 2023-10-05
-        08:45:52.269 +0000 UTC'
-      reason: SecretsUpdated
-      status: "True"
-      type: Ready
 
+### Chart values
+
+| Value | Default | Meaning |
+|---|---|---|
+| `image.repository` | `docker.io/sailorpapay/kube-ecr-secrets-operator` | Operator image (public on Docker Hub) |
+| `image.tag` | chart `appVersion` | Image tag |
+| `image.digest` | `""` | If set, used instead of the tag |
+| `secretNamespaces` | `[]` | Namespaces where the operator may read/write Secrets. Empty = all namespaces. Each one must exist before `helm install/upgrade` (the chart creates a Role in it). If such a namespace is deleted and recreated, run `helm upgrade` again to recreate the Role |
+| `pullSecrets` | `[]` | Objects to create, see above. To remove all of them with `--reuse-values`, pass `--set-json 'pullSecrets=[]'` (`=null` keeps the old list) |
+| `metricsBindAddress` | `"0"` | `"0"` disables metrics (the endpoint has no auth); e.g. `":8080"` |
+| `resources`, `nodeSelector`, `tolerations`, `affinity`, `priorityClassName`, `podAnnotations` | | Usual pod settings |
+
+## Status and troubleshooting
+
+```bash
+kubectl --context your-context get clusterawsecrimagepullsecrets
+kubectl --context your-context describe clusterawsecrimagepullsecret ecr
 ```
 
-The `status`  provides enough information to identify potential issues. Additionally, the controller emits Kubernetes events whenever an action is taken. The following events can be observed: `SecretCreationSuccess`, `SecretUpdateSuccess`, `CreateSecretError`, `UpdateSecretError`.
+`Ready=True` / `SecretsUpdated` shows when the token expires and when the next refresh happens.
+If some namespaces fail, the others are still written and the message lists every failed namespace.
+The operator retries errors that need your action every 5 minutes:
 
-The logs of the controller pod can also help: `kubectl logs -l app.kubernetes.io/name=kube-ecr-secrets-operator -n kube-ecr-secrets-operator-system`
+| Reason | Cause |
+|---|---|
+| `CredentialsInvalid` | Credentials Secret missing, missing a key, or its namespace is not in `secretNamespaces` |
+| `AWSRequestFailed` | AWS rejected the keys or the IAM user lacks `ecr:GetAuthorizationToken` |
+| `SecretConflict` | A Secret with that name already exists and was not created by this object. The operator does not overwrite it |
 
-## Short names:
+To refresh immediately, change any annotation on the object:
 
-For easy typing and memorizing, the CRDs have the following short names:
+```bash
+kubectl --context your-context annotate clusterawsecrimagepullsecret ecr refresh="$(date +%s)" --overwrite
+```
 
-`AWSECRImagePullSecret` -> `aeps`
+## Security
 
-`ClusterAWSECRImagePullSecret` -> `caeps`
+- Runs as non-root (65532) with a read-only root filesystem, all capabilities dropped and seccomp `RuntimeDefault`, from a distroless image.
+- No webhook, no certificates, no Service. Only the health probe listens, on `:8081`.
+- Secret access is `get/create/update/patch/delete`, with no `list`/`watch` because Secrets are not cached. Use `secretNamespaces` to limit access to specific namespaces.
+- The operator only updates or deletes Secrets it created itself, checked by owner UID.
 
-example: `kubectl get aeps`
+## Changes from upstream
 
-## Running Tests:
+| Removed / changed | Why |
+|---|---|
+| Mutating webhook, cert job, cert-manager option, Service | The webhook only converted the deprecated `v1alpha1` object and validated credentials. CEL rules now do the validation, with no TLS setup |
+| `v1alpha1` `AWSECRCredential` and its controller | Converting deletes the old object, and garbage collection then removes the pull secrets it owned. Old-format objects converted to empty keys |
+| Keys inline in the object | Moved to a referenced Secret |
+| Overwriting any Secret with the target name | Now a `SecretConflict` status |
+| Cluster-wide `list/watch` on Secrets | Not needed. Secrets are read directly, without a cache |
+| Refresh only near expiry | Hourly, so a lost pull secret comes back quickly. One failing namespace no longer blocks the others |
+| Metrics on by default | Off by default (no auth on the endpoint) |
+| Silent failures | Status conditions with reasons, plus events |
 
-To run tests, the following environment variables need to set `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` in the terminal from which the tests are run. Afterwards, the tests can be run using: `make unit-test`
+## Development
+
+```bash
+make build          # generate, fmt, vet, build bin/manager
+make generate       # regenerate DeepCopy and chart CRDs after editing api/v1alpha2
+make helm-lint
+make docker-build IMG=docker.io/your-username/kube-ecr-secrets-operator:0.1.0
+make docker-push  IMG=docker.io/your-username/kube-ecr-secrets-operator:0.1.0
+```
+
+License: Apache 2.0, same as upstream.

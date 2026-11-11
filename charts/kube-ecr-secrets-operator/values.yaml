@@ -1,0 +1,38 @@
+image:
+  repository: docker.io/sailorpapay/kube-ecr-secrets-operator
+  # Defaults to the chart appVersion. A digest, if set, wins over the tag.
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# Namespaces the operator may read/write Secrets in: the namespace of the AWS credentials
+# Secret plus every namespace that gets a pull secret. One Role per namespace.
+# Leave empty to allow any namespace (cluster-wide get/create/update/patch on Secrets).
+secretNamespaces: []
+
+# Optional: create the objects from the chart. See README for the format.
+# Without these, create AWSECRImagePullSecret / ClusterAWSECRImagePullSecret yourself.
+pullSecrets: []
+#  - name: ecr
+#    region: eu-west-3
+#    # Secret with AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY, created beforehand.
+#    credentialsSecret: aws-ecr-credentials
+#    credentialsNamespace: default
+#    secretName: ecr-pull
+#    namespaces: [default]
+
+# Metrics endpoint (no authentication). "0" disables it; e.g. ":8080" enables it.
+metricsBindAddress: "0"
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""

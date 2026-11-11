@@ -1,1 +1,0 @@
-Congrats! the kube-ecr-secrets-operator has been installed. You can start by creating an AWSECRImagePullSecret or ClusterAWSECRImagePullSecret object.

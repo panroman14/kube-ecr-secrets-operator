@@ -1,5 +1,5 @@
 # Build the manager binary
-FROM golang:1.27.1 AS builder
+FROM golang:1.27.4@sha256:08bcb99a38f85a265f9a93d1d3323e2440eec333380f3ea26ee0dec9264bb41c AS builder
 
 WORKDIR /workspace
 # Copy the Go Modules manifests
@@ -16,11 +16,13 @@ COPY controllers/ controllers/
 COPY common/ common/
 
 # Build
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o manager main.go
+# TARGETARCH is set by docker buildx (--platform); amd64 when building without it.
+ARG TARGETARCH=amd64
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o manager main.go
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.io/distroless/static:nonroot
+FROM gcr.io/distroless/static:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329
 WORKDIR /
 COPY --from=builder /workspace/manager .
 USER 65532:65532

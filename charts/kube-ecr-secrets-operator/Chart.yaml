@@ -1,0 +1,13 @@
+apiVersion: v2
+name: kube-ecr-secrets-operator
+description: Keeps AWS ECR image pull secrets fresh in Kubernetes (ECR tokens expire every 12h).
+type: application
+version: 0.1.0
+# Operator image version. Fork of upstream kube-ecr-secrets-operator 0.2.13.
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/panroman14/kube-ecr-secrets-operator
+keywords:
+  - AWS
+  - ECR
+  - imagePullSecrets

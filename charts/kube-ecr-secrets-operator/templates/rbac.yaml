@@ -1,0 +1,74 @@
+{{- $name := include "epso.name" . -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "epso.labels" . | nindent 4 }}
+rules:
+# Its own objects: watch them, report status.
+- apiGroups: ["aws.zakariaamine.com"]
+  resources: ["awsecrimagepullsecrets", "clusterawsecrimagepullsecrets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["aws.zakariaamine.com"]
+  resources: ["awsecrimagepullsecrets/status", "clusterawsecrimagepullsecrets/status"]
+  verbs: ["get", "update", "patch"]
+# Events on its objects (both event APIs, depending on the client version).
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+- apiGroups: ["events.k8s.io"]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+{{- if not .Values.secretNamespaces }}
+# No secretNamespaces: Secrets in any namespace. Never list/watch (secrets are not cached)
+# delete only removes its own pull secret from namespaces dropped from spec.namespaces.
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "create", "update", "patch", "delete"]
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "epso.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}
+subjects:
+- kind: ServiceAccount
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+{{- range $ns := .Values.secretNamespaces | default list | uniq }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-secrets
+  namespace: {{ $ns }}
+  labels:
+    {{- include "epso.labels" $ | nindent 4 }}
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-secrets
+  namespace: {{ $ns }}
+  labels:
+    {{- include "epso.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}-secrets
+subjects:
+- kind: ServiceAccount
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+{{- end }}

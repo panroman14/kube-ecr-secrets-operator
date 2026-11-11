@@ -1,0 +1,67 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go build ./...
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - name: CRDs are up to date
+        run: make generate && git diff --exit-code
+      - uses: azure/setup-helm@v4
+      - run: make helm-lint
+
+  smoke:
+    # Installs the chart on kind and checks the paths that need no AWS account:
+    # CEL validation and status reporting for a missing credentials Secret.
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: helm/kind-action@v1
+      - uses: azure/setup-helm@v4
+      - name: build image and load into kind
+        run: |
+          docker build . -t epso:ci
+          kind load docker-image epso:ci -n chart-testing
+      - name: install chart
+        run: |
+          helm install epso charts/kube-ecr-secrets-operator -n epso --create-namespace \
+            --set image.repository=epso --set image.tag=ci
+          kubectl -n epso rollout status deploy --timeout=60s
+      - name: CEL rejects a cluster object without secretNamespace
+        run: |
+          ! kubectl apply -f - <<'Y'
+          apiVersion: aws.zakariaamine.com/v1alpha2
+          kind: ClusterAWSECRImagePullSecret
+          metadata: {name: bad}
+          spec:
+            awsAccess: {secretName: c, region: eu-west-1}
+            secretName: p
+            namespaces: [default]
+          Y
+      - name: missing credentials Secret is reported in status
+        run: |
+          kubectl apply -f - <<'Y'
+          apiVersion: aws.zakariaamine.com/v1alpha2
+          kind: ClusterAWSECRImagePullSecret
+          metadata: {name: missing}
+          spec:
+            awsAccess: {secretName: no-such-secret, secretNamespace: default, region: eu-west-1}
+            secretName: p
+            namespaces: [default]
+          Y
+          kubectl wait --timeout=30s --for=jsonpath='{.status.conditions[0].reason}'=CredentialsInvalid \
+            clusterawsecrimagepullsecret/missing
